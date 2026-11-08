@@ -1,0 +1,10 @@
+{
+  "name": "google-calendar",
+  "label": "Google Calendar",
+  "description": "Google Calendar events (uses google-workspace OAuth)",
+  "icon": "Calendar",
+  "version": "0.1.0",
+  "tab": { "path": "/calendar", "position": "after:skills" },
+  "entry": "dist/index.js",
+  "api": "plugin_api.py"
+}

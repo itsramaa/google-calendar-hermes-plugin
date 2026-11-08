@@ -1,0 +1,5 @@
+﻿name: google-calendar
+version: "0.1.0"
+description: "Google Calendar integration: list, create, and delete events with a dashboard view"
+requires_env: []   # uses shared google-workspace token, not a plugin-specific env key
+requires_tools: []
