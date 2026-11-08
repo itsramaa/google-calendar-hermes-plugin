@@ -27,6 +27,21 @@ _MISSING_TOKEN_HINT = (
 )
 
 
+def _oauth_lock(token_path):
+    """Import the shared OAuth side-car lock, tolerating an absent common module."""
+    try:
+        import sys
+        from pathlib import Path as _Path
+        common_dir = _Path(__file__).resolve().parent.parent / "common"
+        if str(common_dir.parent) not in sys.path:
+            sys.path.insert(0, str(common_dir.parent))
+        from common.profile_resolver import google_token_lock
+        return google_token_lock(token_path)
+    except Exception:  # noqa: BLE001 — never break auth on a lock import failure
+        from contextlib import nullcontext
+        return nullcontext()
+
+
 def _http_error(exc: Exception) -> CalendarPluginError:
     status = getattr(getattr(exc, "resp", None), "status", None)
     msg = "Google Calendar API request failed"
@@ -93,28 +108,20 @@ class GoogleCalendarClient:
             ) from exc
 
         if creds.expired and creds.refresh_token:
-            try:
-                creds.refresh(Request())
-            except Exception as exc:  # noqa: BLE001
-                raise CalendarAuthError(
-                    "Failed to refresh Google Workspace token.",
-                    code="refresh_failed",
-                    hint=_MISSING_TOKEN_HINT,
-                ) from exc
-            try:
-                payload = json.loads(creds.to_json())
-                if not payload.get("type"):
-                    payload["type"] = "authorized_user"
-                token_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-                if os.name != "nt":
-                    try:
-                        token_path.chmod(0o600)
-                    except Exception:  # noqa: BLE001
-                        pass
-            except Exception as exc:  # noqa: BLE001
-                logger.debug(
-                    "google-calendar: failed to persist refreshed token: %s", exc
-                )
+            # Same OAuth race mitigation as gmail client: refresh + persist
+            # only while holding the side-car file lock.
+            with _oauth_lock(token_path):
+                try:
+                    reloaded = Credentials.from_authorized_user_file(str(token_path))
+                    if not reloaded.expired:
+                        creds = reloaded
+                    else:
+                        creds = self._refresh_and_persist(creds, token_path)
+                except CalendarAuthError:
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("google-calendar: token reload after lock failed: %s", exc)
+                    creds = self._refresh_and_persist(creds, token_path)
 
         if not creds.valid:
             raise CalendarAuthError(
@@ -124,6 +131,35 @@ class GoogleCalendarClient:
             )
 
         return build("calendar", "v3", credentials=creds, cache_discovery=False)
+
+    def _refresh_and_persist(self, creds, token_path):
+        """Refresh the token and persist it, called while holding the OAuth lock."""
+        from google.auth.transport.requests import Request
+
+        try:
+            creds.refresh(Request())
+        except Exception as exc:  # noqa: BLE001
+            raise CalendarAuthError(
+                "Failed to refresh Google Workspace token.",
+                code="refresh_failed",
+                hint=_MISSING_TOKEN_HINT,
+            ) from exc
+        try:
+            payload = json.loads(creds.to_json())
+            if not payload.get("type"):
+                payload["type"] = "authorized_user"
+            token_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            if os.name != "nt":
+                try:
+                    token_path.chmod(0o600)
+                except Exception:  # noqa: BLE001
+                    pass
+            return creds
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "google-calendar: failed to persist refreshed token: %s", exc
+            )
+            return creds
 
     def _run_sync(self, fn):
         try:
